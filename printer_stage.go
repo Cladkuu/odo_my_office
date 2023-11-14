@@ -6,16 +6,26 @@ import (
 	"github.com/Cladkuu/odo_my_office/state"
 	workerPool "github.com/Cladkuu/odo_my_office/worker"
 	"io"
-	"unsafe"
 )
 
+// стадия, которая печатает результаты в io.Writer
 type Printer struct {
-	worker  workerPool.IWorker
-	wr      io.WriteCloser
-	state   *state.State
-	read    chan HTTPRequesterResponse
-	errors  chan error
+	// пул воркеров
+	worker workerPool.IWorker
+	// поток, в который будет идти запись
+	wr io.WriteCloser
+	// состояние принтера
+	state *state.State
+	// канал, из которого приходят обработанные урлы
+	read chan HTTPRequesterResponse
+
+	// канал, из которого приходят ошибки
+	errors chan error
+
+	// канал для завершения принтера
 	closeCH chan struct{}
+
+	cancel context.CancelFunc
 }
 
 func NewStdOutPrinter(
@@ -33,20 +43,9 @@ func NewStdOutPrinter(
 	}
 }
 
-/*func (p *Printer) SendTask(msg string) error {
-	if err := p.state.IsActive(); err != nil {
-		return err
-	}
-	p.worker.SendTask(p.createRequest(msg))
-
-	return nil
-}*/
-
 func (p *Printer) work(ctx context.Context) {
 
-	defer func() {
-		close(p.closeCH)
-	}()
+	defer p.Close()
 
 	var ok1, ok2 bool
 	var e error
@@ -59,6 +58,7 @@ func (p *Printer) work(ctx context.Context) {
 		case s, ok1 = <-p.read:
 			if !ok1 {
 				if !ok2 {
+					p.graceful()
 					return
 				}
 				continue
@@ -68,22 +68,31 @@ func (p *Printer) work(ctx context.Context) {
 				return
 			}
 			p.worker.SendTask(
-				func() {
-					str := fmt.Sprintf("url:%s, response_size: %d, time_processing: %s", s.path, s.size, s.processed.String())
-					_, _ = p.wr.Write(*(*[]byte)(unsafe.Pointer(&str)))
+				workerPool.Request{
+					F: func() {
+						str := fmt.Sprintf("url:%s, response_size: %d, time_processing: %s\n", s.path, s.size, s.processed.String())
+
+						_, _ = p.wr.Write([]byte(str))
+
+					},
+					RType: workerPool.RTypeBusiness,
 				},
 			)
 		case e, ok2 = <-p.errors:
 			if !ok2 {
 				if !ok1 {
+					p.graceful()
 					return
 				}
 				continue
 			}
 			p.worker.SendTask(
-				func() {
-					str := e.Error()
-					_, _ = p.wr.Write(*(*[]byte)(unsafe.Pointer(&str)))
+				workerPool.Request{
+					F: func() {
+						_, _ = p.wr.Write(append([]byte(e.Error()), '\n'))
+
+					},
+					RType: workerPool.RTypeBusiness,
 				},
 			)
 		}
@@ -92,8 +101,27 @@ func (p *Printer) work(ctx context.Context) {
 
 }
 
+func (p *Printer) graceful() {
+	ch := make(chan struct{})
+	_ = p.worker.SendTask(
+		workerPool.Request{
+			F: func() {
+				close(ch)
+			},
+			RType: workerPool.RTypeTasksEnded,
+		},
+	)
+	<-ch
+}
+
 func (p *Printer) Run(ctx context.Context) error {
 	if err := p.state.Activate(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	p.cancel = cancel
+
+	if err := p.worker.Run(ctx); err != nil {
 		return err
 	}
 
@@ -107,9 +135,14 @@ func (p *Printer) Close() error {
 		return err
 	}
 
+	p.cancel()
+	_ = p.worker.Close()
+
 	_ = p.wr.Close()
 
 	err = p.state.Close()
+
+	close(p.closeCH)
 
 	return err
 

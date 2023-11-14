@@ -5,10 +5,14 @@ import (
 	"github.com/Cladkuu/odo_my_office/state"
 )
 
+// worker
 type Worker struct {
+	// канал на получение задач
 	requests chan Request
-	closeCh  chan struct{}
-	state    *state.State
+	// канал для graceful shutdown
+	closeCh chan struct{}
+	// состояние
+	state *state.State
 }
 
 func newWorker() *Worker {
@@ -33,7 +37,8 @@ func (w *Worker) Run(ctx context.Context) error {
 
 func (w *Worker) work(ctx context.Context) {
 	defer func() {
-		w.closeCh <- struct{}{}
+		close(w.closeCh)
+		_ = w.Close()
 	}()
 
 	for {
@@ -43,7 +48,13 @@ func (w *Worker) work(ctx context.Context) {
 				return
 			}
 
-			req()
+			switch req.RType {
+			case RTypeBusiness:
+				req.F()
+			case RTypeTasksEnded:
+				req.F()
+				return
+			}
 
 		case <-ctx.Done():
 			return
@@ -67,7 +78,6 @@ func (w *Worker) Close() error {
 	}
 
 	<-w.closeCh
-	close(w.closeCh)
 	close(w.requests)
 
 	err = w.state.Close()

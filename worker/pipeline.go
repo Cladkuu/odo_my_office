@@ -1,22 +1,27 @@
+// Реализация пайплайна
+
 package workerPool
 
 import (
 	"context"
-	"fmt"
 	"io"
 
 	"github.com/Cladkuu/odo_my_office/state"
 )
 
+// Интерфейс финальной стадии.
+// Нужен, чтобы понять, что все стадии завершились
 type Finalizer interface {
 	Done() <-chan struct{}
 }
 
+// Интерфейс генератора данных
 type Generator interface {
-	Generate(ctx context.Context)
+	Generate(ctx context.Context) error
 	io.Closer
 }
 
+// Интерфейс стадии
 type Stage interface {
 	Run(ctx context.Context) error
 	io.Closer
@@ -31,27 +36,35 @@ type Pipeline struct {
 }
 
 func NewPipeline(generator Generator, finalizer Finalizer, stages ...Stage) *Pipeline {
-	p := &Pipeline{
+	return &Pipeline{
 		state:     state.NewState(),
 		generator: generator,
+		finalizer: finalizer,
+		stages:    stages,
 	}
 
-	p.stages = stages
-
-	return p
 }
 
+// Запускаем пайплайн
 func (p *Pipeline) Run(ctx context.Context) error {
 	if err := p.state.Activate(); err != nil {
 		return err
 	}
 
+	defer p.Close()
+
 	ctx, cancel := context.WithCancel(ctx)
 	p.cancel = cancel
 
-	p.generator.Generate(ctx)
+	// запускаем генератор.
+	// Генерация должна происходить в отлельной горутине
+	err := p.generator.Generate(ctx)
+	if err != nil {
+		return err
+	}
 
-	var err error
+	// запускаем стадии
+	// работа стадии должна происходить в отдельной горутине
 	for _, st := range p.stages {
 		err = st.Run(ctx)
 		if err != nil {
@@ -59,6 +72,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	}
 
+	// Ждем результат
+	// Либо все стадии завершены
+	// Либо завершение по таймауту
 	select {
 	case <-p.finalizer.Done():
 		return nil
@@ -82,7 +98,6 @@ func (p *Pipeline) Close() error {
 	}
 
 	err = p.state.Close()
-	fmt.Println("pipe closed")
 
 	return err
 }

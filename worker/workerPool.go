@@ -8,19 +8,49 @@ import (
 	"github.com/Cladkuu/odo_my_office/state"
 )
 
-type Request func()
-
+// Интерфейс Воркера и Воркер пула
 type IWorker interface {
 	io.Closer
 	SendTask(req Request) error
 	Run(ctx context.Context) error
 }
 
+// структура, отвечающая за работу с воркерами
 type workers struct {
+	// текущее кол-во воркеров
 	workerCount int
-	workers     []IWorker
+	// слайс воркеров
+	workers []IWorker
+	// индекс воркера, которому была оправлена последняя задача
+	// нужен для round-robin по выбору воркера
 	workerIndex int
 	mutex       *sync.Mutex
+}
+
+func (w *workers) sendTaskToAll(req Request) error {
+	var err error
+	switch req.RType {
+	case RTypeTasksEnded:
+		ch := make(chan struct{})
+		defer close(ch)
+
+		r := Request{RType: req.RType}
+		r.F = func() {
+			ch <- struct{}{}
+		}
+
+		for _, work := range w.workers {
+			err = work.SendTask(r)
+			if err != nil {
+				return err
+			}
+
+			<-ch
+		}
+
+	}
+
+	return nil
 }
 
 func (w *workers) Close() error {
@@ -75,11 +105,16 @@ func newWorkers(count int) *workers {
 	return w
 }
 
+// воркер пул
 type WorkerPool struct {
+	// канал задач
 	requests <-chan Request
-	workers  *workers
-	cancel   context.CancelFunc
-	state    *state.State
+	// вокеры
+	workers *workers
+	// отмена контеста
+	cancel context.CancelFunc
+	// состояние
+	state *state.State
 }
 
 func NewWorkerPool(count int) *WorkerPool {
@@ -112,7 +147,23 @@ func (w *WorkerPool) SendTask(req Request) error {
 		return err
 	}
 
-	return w.workers.GetWorker().SendTask(req)
+	var err error
+
+	// TODO переделать в будущем
+	switch req.RType {
+	case RTypeBusiness:
+		err = w.workers.GetWorker().SendTask(req)
+
+	case RTypeTasksEnded:
+		err = w.workers.sendTaskToAll(req)
+		if err != nil {
+			return err
+		}
+		_ = w.Close()
+		req.F()
+	}
+
+	return nil
 }
 
 func (w *WorkerPool) Close() error {

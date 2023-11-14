@@ -6,14 +6,26 @@ import (
 	"io"
 )
 
+// стадия, на которой происходит считывание урлов из файла
 type PathGenerator struct {
-	f       io.ReadCloser
-	state   *state.State
+	// reader, откуда считывать данные
+	f io.ReadCloser
+	// состояние генератора
+	state *state.State
+	// канал для graceful shutdown.
 	closeCH chan struct{}
-	buf     []byte
-	gen     chan string
-	url     []byte
-	cancel  context.CancelFunc
+
+	// буфер для чтения из f
+	buf []byte
+
+	// канал, куда генератор пишет прочитанные данные
+	gen chan string
+
+	// слайс для хранения урлов в байтовом представлении
+	url []byte
+
+	// функция отмены контекста для генератора
+	cancel context.CancelFunc
 }
 
 func NewPathGenerator(
@@ -22,26 +34,29 @@ func NewPathGenerator(
 	return &PathGenerator{
 		f:       f,
 		state:   state.NewState(),
-		closeCH: make(chan struct{}),
+		closeCH: make(chan struct{}, 1),
 		buf:     make([]byte, 32),
 		gen:     make(chan string),
 		url:     make([]byte, 0, 32),
 	}
 }
 
-// TODO Доделать
-func (p *PathGenerator) Generate(ctx context.Context) {
+func (p *PathGenerator) Generate(ctx context.Context) error {
+	if err := p.state.Activate(); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	p.cancel = cancel
 
 	go func() {
-		// TODO add state
 		defer func() {
-			close(p.gen)
 			p.closeCH <- struct{}{}
+			p.Close()
 		}()
 
 		var n int
 		var err error
-		var nI int = -1
 
 		for {
 			select {
@@ -49,52 +64,52 @@ func (p *PathGenerator) Generate(ctx context.Context) {
 				return
 			default:
 
-				for {
-					// считываем байты
-					n, err = p.f.Read(p.buf)
+				// считываем байты
+				n, err = p.f.Read(p.buf)
 
-					// бежим
-					for i, b := range p.buf[:n] {
-						if b == '\n' {
-							nI = i
-							break
-						}
-						p.url = append(p.url, b)
-					}
-
-					if nI != -1 {
+				// бежим
+				for _, b := range p.buf[:n] {
+					if b == '\n' {
 						p.gen <- string(p.url)
+
 						p.url = p.url[:0]
+						continue
+					}
+					p.url = append(p.url, b)
+				}
 
-						for _, b := range p.buf[n+1:] {
-							p.url = append(p.url, b)
-						}
+				if err != nil {
+					if len(p.url) > 0 {
 
-						nI = -1
-					} else if len(p.gen) > 0 && err == io.EOF {
 						p.gen <- string(p.url)
-						p.url = p.url[:0]
 					}
-
-					if err != nil {
-						return
-					}
+					return
 				}
 
 			}
 		}
 	}()
 
+	return nil
 }
 
 func (p *PathGenerator) Close() error {
+	err := p.state.ShutDown()
+	if err != nil {
+		return err
+	}
+
+	p.cancel()
 
 	<-p.closeCH
 	close(p.closeCH)
+	close(p.gen)
 
 	p.buf = nil
 	p.url = nil
 
-	return nil
+	err = p.state.Close()
+
+	return err
 
 }
