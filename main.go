@@ -36,7 +36,6 @@ func main() {
 		fmt.Printf("file with path: %s,- is not opened. err: %s", path, err.Error())
 		os.Exit(127)
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
